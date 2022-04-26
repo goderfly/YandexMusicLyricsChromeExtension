@@ -16,9 +16,6 @@
     "notifications",
     "scripting"
   ],
-  "omnibox": {
-    "keyword": "jp"
-  },
   "content_scripts": [
     {
       "matches": [
