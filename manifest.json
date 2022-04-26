@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "$name",
+  "description": "$description",
+  "version": "$version",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "host_permissions" : [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "permissions" : [
+    "webRequest",
+    "background",
+    "notifications",
+    "scripting",
+    "<all_urls>",
+    "https://api.genius.com/*"
+  ],
+  "optional_permissions": [
+    "http://*/*",
+    "https://*/*",
+    "https://api.genius.com/*"
+  ],
+  "omnibox": {
+    "keyword": "jp"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://music.yandex.ru/*"
+      ],
+      "js": [
+        "content.js"
+      ]
+    }
+  ]
+}
