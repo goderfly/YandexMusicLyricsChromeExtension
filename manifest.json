@@ -14,14 +14,7 @@
     "webRequest",
     "background",
     "notifications",
-    "scripting",
-    "<all_urls>",
-    "https://api.genius.com/*"
-  ],
-  "optional_permissions": [
-    "http://*/*",
-    "https://*/*",
-    "https://api.genius.com/*"
+    "scripting"
   ],
   "omnibox": {
     "keyword": "jp"
