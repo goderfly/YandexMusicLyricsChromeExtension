@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "$name",
-  "description": "$description",
-  "version": "$version",
+  "name": "Yandex Music Lyrics",
+  "description": "Quickly auto find and show lyrics for Ya music",
+  "version": "1.1",
   "background": {
     "service_worker": "background.js"
   },
