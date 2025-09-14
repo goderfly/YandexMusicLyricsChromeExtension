@@ -11,10 +11,7 @@
     "https://*/*"
   ],
   "permissions" : [
-    "webRequest",
-    "background",
-    "notifications",
-    "scripting"
+    "background"
   ],
   "content_scripts": [
     {
