@@ -40,6 +40,7 @@ function observeMeta(container) {
 
     let lastQuery = "";
     let debounceId = null;
+    let currentRequestId = 0;
 
     const buildAndSend = () => {
         const titleEl = container.querySelector(`${titleContainerSelector} ${titleSelector}`) || container.querySelector(titleSelector);
@@ -57,9 +58,23 @@ function observeMeta(container) {
         const query = `${artists} ${title}`;
         if (query === lastQuery) return;
         lastQuery = query;
-        requestLyrics(query)
-            .then(insertLyricsInDiv)
+        clearLyrics();
+        const reqId = ++currentRequestId;
+        requestLyrics(artists, title, query)
+            .then((data) => {
+                if (reqId === currentRequestId) insertLyrics(data);
+            })
             .catch(() => {});
+    };
+
+    // Мгновенно стираем текст при любом изменении метаданных, до debounce
+    const clearImmediately = () => {
+        const titleEl = container.querySelector(`${titleContainerSelector} ${titleSelector}`) || container.querySelector(titleSelector);
+        const title = getText(titleEl);
+        const artistNodes = container.querySelectorAll(`${artistsSelector} a, ${artistsSelector} span, ${artistsSelector}`);
+        const artists = Array.from(artistNodes).map(getText).filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(', ');
+        const query = `${artists} ${title}`;
+        if (query !== lastQuery) clearLyrics();
     };
 
     // Начальный запуск, если элементы уже есть
@@ -96,6 +111,7 @@ function observeMeta(container) {
         }
 
         if (relevant) {
+            clearImmediately();
             if (debounceId) clearTimeout(debounceId);
             debounceId = setTimeout(buildAndSend, 300);
         }
@@ -109,9 +125,9 @@ function observeMeta(container) {
     });
 }
 
-function requestLyrics(songName) {
+function requestLyrics(artist, title, query) {
     return new Promise((resolve, reject) => {
-        const message = { type: "FindLyrics", query: songName };
+        const message = { type: "FindLyrics", artist, title, query };
         chrome.runtime.sendMessage(message, (response) => {
             if (chrome.runtime.lastError) {
                 reject(chrome.runtime.lastError);
@@ -122,46 +138,161 @@ function requestLyrics(songName) {
     });
 }
 
-function insertLyricsInDiv(htmlString) {
-    const sample = (htmlString || '').slice(0, 50).trim().toLowerCase();
-    if (sample.startsWith('<!doctype html')) {
-        return;
+const TIMECODE_SELECTOR = 'input[aria-label="Управление таймкодом"]';
+const LYRICS_STYLES = {
+    position: 'absolute',
+    right: '0',
+    scrollbarWidth: 'none',
+    width: '28%',
+    overflowY: 'auto',
+    overflowX: 'hidden',
+    wordWrap: 'break-word',
+    overflowWrap: 'break-word',
+    fontWeight: '500',
+    fontFamily: "var(--ys-font-family, 'YS Text', 'Helvetica Neue', Arial, sans-serif)",
+    fontSize: '14px',
+    lineHeight: '1.5',
+    color: 'rgba(255, 255, 255, 0.7)',
+    letterSpacing: '0.3px',
+    padding: '16px 24px 100px 24px',
+    boxSizing: 'border-box',
+    maskImage: 'linear-gradient(to bottom, black 0%, black 80%, transparent 100%)',
+    WebkitMaskImage: 'linear-gradient(to bottom, black 0%, black 80%, transparent 100%)',
+};
+
+let syncTimerId = null;
+let resizeObserver = null;
+
+function clearLyrics() {
+    if (syncTimerId) { clearInterval(syncTimerId); syncTimerId = null; }
+    if (resizeObserver) { resizeObserver.disconnect(); resizeObserver = null; }
+    const existing = document.querySelector('#ym-lyrics');
+    if (existing) existing.remove();
+}
+
+// Парсит формат "[mm:ss.xx] текст" в массив {time, text}
+function parseSyncedLyrics(synced) {
+    if (!synced) return null;
+    const lines = [];
+    for (const raw of synced.split('\n')) {
+        const match = raw.match(/^\[(\d+):(\d+\.?\d*)\]\s?(.*)$/);
+        if (!match) continue;
+        const time = parseInt(match[1]) * 60 + parseFloat(match[2]);
+        const text = match[3];
+        lines.push({ time, text });
     }
-    const container = document.querySelector('[class^="VibeBlock_root__"][class*="MainPage_vibe__"]') ||
-        document.querySelector('[class^="VibeBlock_root__"]');
-    if (!container) {
-        return;
-    }
-    // Удаляем шапку LyricsHeader__Container* из приходящего HTML перед вставкой
-    const tmp = document.createElement('div');
-    tmp.innerHTML = htmlString || '';
-    const headers = tmp.querySelectorAll('[class^="LyricsHeader__Container"]');
-    headers.forEach((el) => el.remove());
-    // Удаляем стили: inline style и style-теги, а также классы
-    const styleTags = tmp.querySelectorAll('style');
-    styleTags.forEach((el) => el.remove());
-    const styledNodes = tmp.querySelectorAll('[style]');
-    styledNodes.forEach((el) => el.removeAttribute('style'));
-    const classedNodes = tmp.querySelectorAll('[class]');
-    classedNodes.forEach((el) => el.removeAttribute('class'));
-    const cleanedHtml = tmp.innerHTML;
-    // Удалим предыдущий наш блок, если он уже добавлен
-    const existing = container.querySelector('#ym-lyrics');
-    if (existing) {
-        existing.remove();
-    }
-    // Добавим новый блок с лирикой
+    return lines.length > 0 ? lines : null;
+}
+
+function escapeHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function getPlayerTimeSec() {
+    const slider = document.querySelector(TIMECODE_SELECTOR);
+    return slider ? parseFloat(slider.value) || 0 : 0;
+}
+
+function insertLyrics(data) {
+    const syncedLyrics = data?.syncedLyrics || null;
+    const plainLyrics = data?.plainLyrics || null;
+    const notFound = !syncedLyrics && !plainLyrics;
+
+    const content = document.querySelector('[class*="MainPage_content__"]');
+    if (!content) return;
+
+    const pos = getComputedStyle(content).position;
+    if (pos === 'static') content.style.position = 'relative';
+
+    clearLyrics();
+
     const wrapper = document.createElement('div');
     wrapper.id = 'ym-lyrics';
-    wrapper.style.position = 'absolute';
-    wrapper.style.right = '0';
-    wrapper.style.top = '10px';
-    wrapper.style.scrollbarWidth = 'none';   
-    wrapper.style.maxWidth = '25%';
-    wrapper.style.maxHeight = '650px';
-    wrapper.style.overflowY = 'auto';
-    wrapper.innerHTML = cleanedHtml;
-    container.appendChild(wrapper);
+    Object.assign(wrapper.style, LYRICS_STYLES);
+    wrapper.style.top = '0';
+
+    // Пересчитываем bottom при resize
+    const recalcBottom = () => {
+        const header = content.querySelector('[class*="Skeleton_header"]');
+        const ch = content.offsetHeight;
+        let bottom;
+        if (header) {
+            const cr = content.getBoundingClientRect();
+            const hr = header.getBoundingClientRect();
+            bottom = ch - (hr.top - cr.top) - 50;
+        } else {
+            bottom = 20;
+        }
+        wrapper.style.bottom = bottom + 'px';
+    };
+    recalcBottom();
+    resizeObserver = new ResizeObserver(recalcBottom);
+    resizeObserver.observe(content);
+
+    if (notFound) {
+        wrapper.innerHTML = 'Текст песни не найден :(';
+        wrapper.style.opacity = '0.5';
+        content.appendChild(wrapper);
+        return;
+    }
+
+    const parsed = parseSyncedLyrics(syncedLyrics);
+
+    if (parsed) {
+        // Караоке-режим: каждая строка — отдельный span
+        parsed.forEach((line, i) => {
+            const span = document.createElement('span');
+            span.dataset.idx = i;
+            span.style.display = 'block';
+            span.style.transition = 'all 0.3s ease';
+            span.style.padding = '2px 0';
+            span.innerHTML = escapeHtml(line.text) || '&nbsp;';
+            wrapper.appendChild(span);
+        });
+        content.appendChild(wrapper);
+        startSyncHighlight(wrapper, parsed);
+    } else {
+        // Фоллбэк на plain text
+        wrapper.innerHTML = escapeHtml(plainLyrics).replace(/\n/g, '<br>');
+        content.appendChild(wrapper);
+    }
+}
+
+function startSyncHighlight(wrapper, lines) {
+    let lastIdx = -1;
+    const UPDATE_INTERVAL_MS = 300;
+
+    const update = () => {
+        const sec = getPlayerTimeSec();
+        // Ищем текущую строку: последняя, чьё время <= текущей позиции
+        let idx = -1;
+        for (let i = lines.length - 1; i >= 0; i--) {
+            if (lines[i].time <= sec) { idx = i; break; }
+        }
+        if (idx === lastIdx) return;
+        lastIdx = idx;
+
+        const spans = wrapper.querySelectorAll('span[data-idx]');
+        spans.forEach((span, i) => {
+            if (i === idx) {
+                span.style.color = 'rgba(255, 255, 255, 1)';
+                span.style.fontSize = '16px';
+                span.style.fontWeight = '600';
+            } else {
+                span.style.color = 'rgba(255, 255, 255, 0.7)';
+                span.style.fontSize = '14px';
+                span.style.fontWeight = '500';
+            }
+        });
+
+        // Авто-скролл к текущей строке
+        if (idx >= 0 && spans[idx]) {
+            spans[idx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    };
+
+    update();
+    syncTimerId = setInterval(update, UPDATE_INTERVAL_MS);
 }
 
 function main() {

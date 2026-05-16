@@ -1,76 +1,68 @@
-const token = "Bearer 5TQxk63ZJoaUE2VqBPeVBTejIta4rzgxIl2m-afyCZ10o4RIVCaXbau0IwVhlb3e";
-
-const headers = {
-    "Authorization": token,
-    "Access-Control-Allow-Origin": "*"
+const LRCLIB_BASE = "https://lrclib.net/api";
+const LRCLIB_HEADERS = {
+    "User-Agent": "YandexMusicLyrics/1.2 (https://github.com)"
 };
-
 
 function main() {
     chrome.runtime.onMessage.addListener((message, sender, callback) => {
         if (message.type === "FindLyrics") {
-
-            (async () => {
-                try {
-                    await requestSongPath(message.query, (path) => {
-                        requestLyricsDiv(path, (htmlString) => {
-                            const firstEntry = htmlString.indexOf("data-lyrics-container=\"true\"") - 5;
-                            const lastEntry = htmlString.indexOf("<div class=\"RightSidebar__");
-                            const substring = htmlString.substring(firstEntry, lastEntry).replace(/href=/g, "nop");
-                            callback(applyCustomCss(substring));
-                        });
-                    });
-                } catch (error) {
-                    
-                }
-            })();
+            fetchLyrics(message.artist, message.title, message.query)
+                .then((lyrics) => callback(lyrics || ""))
+                .catch(() => callback(""));
         }
-        return true;
+        return true; // keep callback channel open for async response
     });
 }
 
-function applyCustomCss(str) {
-    return str.replace(/<div data-/g, "<div style=" +
-        "\"font-weight: 400; " +
-        "font-family: 'YSTextMedium';" +
-        "color: #444444;" +
-        "letter-spacing: 0.4px;" +
-        "padding: 32px;\"" +
-        " data-");
+// Пробуем точный запрос по artist+title, затем поиск по общему запросу
+async function fetchLyrics(artist, title, query) {
+    // 1. Точный поиск
+    if (artist && title) {
+        const exact = await tryFetch(
+            `${LRCLIB_BASE}/get?artist_name=${enc(artist)}&track_name=${enc(title)}`
+        );
+        if (exact) return exact;
+    }
+    // 2. Поиск по свободному запросу
+    const results = await trySearchFetch(
+        `${LRCLIB_BASE}/search?q=${enc(query)}`
+    );
+    return results;
 }
 
-function requestSongPath(query, onFetch) {
-    fetch(`https://api.genius.com/search?q=${encodeURIComponent(query)}`, {
-        headers: headers
-    }).then(async (res) => {
-        try {
-            const json = await res.json();
-            const first = json?.response?.hits?.[0]?.result || {};
-            const apiPath = first.api_path || '';
-            const pagePath = first.path || '';
-            onFetch(pagePath);
-        } catch (e) {
-            const text = await res.text();
-            const startPath = text.indexOf("\"path\":\"") + 8;
-            const endPath = text.indexOf("\",\"primary_art\"");
-            const path = text.substring(startPath, endPath);
-            onFetch(path);
-        }
-    }).catch(error => {
-        
-    });
+function extractLyrics(json) {
+    if (!json) return null;
+    return {
+        syncedLyrics: json.syncedLyrics || null,
+        plainLyrics: json.plainLyrics || null
+    };
 }
 
-function requestLyricsDiv(path, onFetch) {
-    fetch(`https://genius.com${path}`, {
-        headers: headers
-    }).then(res => {
-        res.text().then(text => {
-            onFetch(text);
-        });
-    }).catch(error => {
-        
-    });
+async function tryFetch(url) {
+    try {
+        const res = await fetch(url, { headers: LRCLIB_HEADERS });
+        if (!res.ok) return null;
+        const json = await res.json();
+        return extractLyrics(json);
+    } catch {
+        return null;
+    }
+}
+
+async function trySearchFetch(url) {
+    try {
+        const res = await fetch(url, { headers: LRCLIB_HEADERS });
+        if (!res.ok) return null;
+        const arr = await res.json();
+        if (!Array.isArray(arr) || arr.length === 0) return null;
+        return extractLyrics(arr[0]);
+    } catch {
+        return null;
+    }
+}
+
+function enc(s) {
+    return encodeURIComponent(s);
 }
 
 // Инициализация
